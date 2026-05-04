@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NL to SQL Studio</title>
+  <style>
+    :root {
+      --bg: #f6f7f1;
+      --card: #ffffff;
+      --ink: #1a2433;
+      --muted: #4f5f73;
+      --brand: #0f766e;
+      --brand-2: #ea580c;
+      --border: #d5dce4;
+      --ok: #15803d;
+      --bad: #b91c1c;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 10%, rgba(15, 118, 110, 0.18), transparent 40%),
+        radial-gradient(circle at 90% 20%, rgba(234, 88, 12, 0.14), transparent 45%),
+        linear-gradient(180deg, #fcfcf8 0%, var(--bg) 100%);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    .container {
+      width: min(1100px, 94vw);
+      margin: 2rem auto 3rem;
+      display: grid;
+      gap: 1rem;
+      min-width: 0;
+    }
+
+    .hero {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1.2rem;
+      box-shadow: 0 10px 30px rgba(31, 41, 55, 0.08);
+      animation: reveal 450ms ease;
+    }
+
+    .hero h1 {
+      margin: 0;
+      font-size: clamp(1.2rem, 2.1vw, 1.8rem);
+      letter-spacing: 0.02em;
+    }
+
+    .hero p {
+      margin: 0.4rem 0 0;
+      color: var(--muted);
+    }
+
+    .top-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 1rem;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 1rem;
+      box-shadow: 0 8px 24px rgba(31, 41, 55, 0.07);
+      animation: reveal 500ms ease;
+      min-width: 0;
+    }
+
+    .card h2 {
+      margin: 0 0 0.8rem;
+      font-size: 1.05rem;
+    }
+
+    label {
+      display: block;
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+    }
+
+    input, textarea, button {
+      font: inherit;
+    }
+
+    input[type="text"], input[type="number"], textarea {
+      width: 100%;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.6rem 0.7rem;
+      outline: none;
+      transition: border-color 180ms ease;
+      background: #fff;
+      color: var(--ink);
+    }
+
+    input:focus, textarea:focus {
+      border-color: var(--brand);
+    }
+
+    textarea { min-height: 95px; resize: vertical; }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0.7rem;
+    }
+
+    .schema-panel {
+      margin-top: 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #f9fbfd;
+      max-height: 280px;
+      overflow: auto;
+      padding: 0.45rem;
+      width: 100%;
+      min-width: 0;
+    }
+
+    .schema-empty {
+      color: var(--muted);
+      font-size: 0.85rem;
+      padding: 0.35rem;
+    }
+
+    .schema-table {
+      border: 1px solid #dfe6ef;
+      border-radius: 8px;
+      background: #fff;
+      margin-bottom: 0.45rem;
+      overflow: hidden;
+    }
+
+    .schema-table summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 0.55rem 0.65rem;
+      background: #eef4fb;
+      font-weight: 600;
+      font-size: 0.86rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.4rem;
+      min-width: 0;
+    }
+
+    .schema-table summary span:first-child {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .schema-table summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .schema-columns {
+      margin: 0;
+      padding: 0.45rem 0.65rem 0.55rem 1.25rem;
+    }
+
+    .schema-columns li {
+      font-size: 0.84rem;
+      color: #2d3d52;
+      margin: 0.18rem 0;
+    }
+
+    .actions {
+      margin-top: 0.8rem;
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 0;
+      border-radius: 10px;
+      padding: 0.62rem 0.86rem;
+      cursor: pointer;
+      background: var(--brand);
+      color: white;
+      font-weight: 600;
+      transition: transform 150ms ease, filter 150ms ease;
+    }
+
+    button.secondary { background: var(--brand-2); }
+    button:hover { filter: brightness(1.05); transform: translateY(-1px); }
+
+    .status {
+      font-size: 0.88rem;
+      margin-top: 0.5rem;
+      min-height: 1.2rem;
+      overflow-wrap: anywhere;
+    }
+
+    .status.ok { color: var(--ok); }
+    .status.bad { color: var(--bad); }
+
+    pre {
+      background: #0c1624;
+      color: #d7e2f3;
+      border-radius: 12px;
+      padding: 0.8rem;
+      overflow: auto;
+      font-size: 0.84rem;
+      line-height: 1.35;
+      max-width: 100%;
+    }
+
+    .sql-box-wrap {
+      position: relative;
+      margin-top: 0.2rem;
+      margin-bottom: 0.2rem;
+    }
+
+    .sql-box-wrap pre {
+      margin: 0;
+      padding-top: 2.2rem;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .sql-inline-copy,
+    .sql-inline-copy-final {
+      position: absolute;
+      top: 0.45rem;
+      right: 0.45rem;
+      background: rgba(215, 226, 243, 0.12);
+      border: 1px solid rgba(215, 226, 243, 0.4);
+      color: #d7e2f3;
+      border-radius: 8px;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .sql-inline-copy:hover,
+    .sql-inline-copy-final:hover {
+      filter: brightness(1.08);
+      transform: none;
+      background: rgba(215, 226, 243, 0.2);
+    }
+
+    .sql-inline-copy svg,
+    .sql-inline-copy-final svg {
+      width: 1rem;
+      height: 1rem;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 1.8;
+      pointer-events: none;
+    }
+
+    .thread-host {
+      display: grid;
+      gap: 0.7rem;
+      margin-bottom: 0.8rem;
+    }
+
+    .turn-card {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #f9fbfd;
+      padding: 0.75rem;
+    }
+
+    .turn-question {
+      margin: 0;
+      font-size: 0.92rem;
+      font-weight: 600;
+      color: #24354b;
+      overflow-wrap: anywhere;
+    }
+
+    .turn-meta {
+      margin-top: 0.35rem;
+      margin-bottom: 0.4rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+
+    .turn-status {
+      margin-top: 0.35rem;
+      margin-bottom: 0.45rem;
+      font-size: 0.84rem;
+      min-height: 1rem;
+      overflow-wrap: anywhere;
+    }
+
+    .turn-status.ok { color: var(--ok); }
+    .turn-status.bad { color: var(--bad); }
+
+    .winner-badge {
+      display: inline-block;
+      margin-top: 0.35rem;
+      margin-bottom: 0.35rem;
+      border-radius: 999px;
+      padding: 0.28rem 0.65rem;
+      font-size: 0.78rem;
+      font-weight: 700;
+      border: 1px solid var(--border);
+      background: #eef7f6;
+      color: #0d5752;
+    }
+
+    .model-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 0.7rem;
+      margin-top: 0.5rem;
+    }
+
+    .model-box {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 0.55rem;
+      background: #ffffff;
+      min-width: 0;
+    }
+
+    .model-box h3 {
+      margin: 0 0 0.35rem;
+      font-size: 0.9rem;
+    }
+
+    .mini-meta {
+      margin-top: 0.35rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+
+    .composer {
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: #ffffff;
+      padding: 0.75rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.86rem;
+      margin-top: 0.6rem;
+    }
+
+    th, td {
+      border-bottom: 1px solid #e5ebf1;
+      text-align: left;
+      padding: 0.45rem;
+      vertical-align: top;
+    }
+
+    th { color: #24354b; background: #f2f6fb; }
+
+    @keyframes reveal {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 900px) {
+      .top-grid { grid-template-columns: 1fr; }
+      .row { grid-template-columns: 1fr; }
+      .schema-panel { width: 100%; }
+      .model-grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <section class="hero">
+      <h1>NL to SQL Studio</h1>
+      <p>Upload a SQLite database, ask a question in plain English, and inspect SQL + results instantly.</p>
+      <div id="modelStatus" class="status">model not loaded</div>
+    </section>
+
+    <section class="top-grid">
+      <article class="card">
+        <h2>1) Schema</h2>
+        <label>Tables & Columns</label>
+        <div class="row" style="margin-top: 0.6rem;">
+          <div>
+            <label for="dbId">Database ID</label>
+            <input id="dbId" type="text" placeholder="Returned by upload" />
+          </div>
+          <div>
+            <label>&nbsp;</label>
+            <button id="schemaBtn" class="secondary" type="button">View Schema</button>
+          </div>
+        </div>
+        <div id="uploadStatus" class="status" style="margin-top: 0.6rem;"></div>
+        <div id="schemaOutput" class="schema-panel">
+          <div class="schema-empty">Tables will appear here. Click a table to view columns.</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <h2>2) Upload Database</h2>
+        <label for="dbFile">Local DB file (.db, .sqlite, .sqlite3, .duckdb)</label>
+        <input id="dbFile" type="file" accept=".db,.sqlite,.sqlite3,.duckdb" />
+        <div class="actions">
+          <button id="uploadBtn" type="button">Upload</button>
+        </div>
+
+        <label for="connName" style="margin-top: 0.8rem;">Or Connect to Database URL</label>
+        <input id="connName" type="text" placeholder="Connection name (e.g. prod-postgres)" />
+        <input id="connUrl" type="text" placeholder="SQLAlchemy URL (postgresql://user:pass@host:5432/db)" />
+        <div class="actions">
+          <button id="connectBtn" class="secondary" type="button">Connect</button>
+        </div>
+      </article>
+
+    </section>
+
+    <article class="card">
+        <h2>3) Ask Question</h2>
+        <div id="threadHost" class="thread-host"></div>
+
+        <div class="composer">
+          <label for="currentQuestion">Natural language question</label>
+          <textarea id="currentQuestion" placeholder="Example: Show top 10 customers by total spending"></textarea>
+
+          <div class="actions" style="margin-top: 0.5rem;">
+            <button id="askBtn" type="button">Generate and Run SQL</button>
+          </div>
+        </div>
+    </article>
+  </main>
+
+  <script>
+    const uploadBtn = document.getElementById("uploadBtn");
+    const schemaBtn = document.getElementById("schemaBtn");
+    const askBtn = document.getElementById("askBtn");
+    const connectBtn = document.getElementById("connectBtn");
+
+    const dbFile = document.getElementById("dbFile");
+    const connNameInput = document.getElementById("connName");
+    const connUrlInput = document.getElementById("connUrl");
+    const dbIdInput = document.getElementById("dbId");
+    const currentQuestionInput = document.getElementById("currentQuestion");
+
+    const uploadStatus = document.getElementById("uploadStatus");
+    const modelStatus = document.getElementById("modelStatus");
+    const schemaOutput = document.getElementById("schemaOutput");
+    const threadHost = document.getElementById("threadHost");
+
+    const setModelStatus = (kind, text) => {
+      modelStatus.className = `status ${kind}`;
+      modelStatus.textContent = text;
+    };
+
+    const setAskEnabled = (enabled) => {
+      askBtn.disabled = !enabled;
+      askBtn.style.opacity = enabled ? "1" : "0.55";
+      askBtn.style.cursor = enabled ? "pointer" : "not-allowed";
+    };
+
+    setAskEnabled(false);
+
+    const refreshModelStatus = async () => {
+      try {
+        const res = await fetch("/models/status");
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error("Could not read model status");
+        }
+
+        if (data.status === "ready") {
+          setModelStatus("ok", "model ready");
+          setAskEnabled(true);
+          return true;
+        }
+        if (data.status === "loading") {
+          setModelStatus("", "model loading");
+          setAskEnabled(false);
+          return false;
+        }
+        if (data.status === "failed") {
+          setModelStatus("bad", "model load failed");
+          setAskEnabled(false);
+          return true;
+        }
+
+        setModelStatus("", "model not loaded");
+        setAskEnabled(false);
+        return false;
+      } catch (err) {
+        setModelStatus("bad", `model status unavailable: ${String(err)}`);
+        setAskEnabled(false);
+        return true;
+      }
+    };
+
+    const warmupModelsOnLoad = async () => {
+      setModelStatus("", "model loading");
+      setAskEnabled(false);
+      try {
+        await fetch("/models/warmup", { method: "POST" });
+      } catch (err) {
+        setModelStatus("bad", `model warmup failed: ${String(err)}`);
+        setAskEnabled(false);
+        return;
+      }
+
+      const pollStatus = async () => {
+        const done = await refreshModelStatus();
+        if (!done) {
+          window.setTimeout(pollStatus, 1200);
+        }
+      };
+      pollStatus();
+    };
+
+    const renderSchemaExplorer = (payload) => {
+      const schema = payload && payload.schema ? payload.schema : null;
+      const tables = schema && schema.tables ? schema.tables : null;
+
+      schemaOutput.innerHTML = "";
+      if (!tables || Object.keys(tables).length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "schema-empty";
+        empty.textContent = "No tables found in schema.";
+        schemaOutput.appendChild(empty);
+        return;
+      }
+
+      Object.entries(tables).forEach(([tableName, tableInfo]) => {
+        const details = document.createElement("details");
+        details.className = "schema-table";
+
+        const summary = document.createElement("summary");
+        const columns = Array.isArray(tableInfo.columns) ? tableInfo.columns : [];
+        summary.innerHTML = `<span>${tableName}</span><span>${columns.length} cols</span>`;
+        details.appendChild(summary);
+
+        const list = document.createElement("ul");
+        list.className = "schema-columns";
+
+        columns.forEach((col) => {
+          const li = document.createElement("li");
+          const type = col && col.type ? ` (${col.type})` : "";
+          li.textContent = `${col.name}${type}`;
+          list.appendChild(li);
+        });
+
+        details.appendChild(list);
+        schemaOutput.appendChild(details);
+      });
+    };
+
+    const setStatus = (el, kind, text) => {
+      el.className = `status ${kind}`;
+      el.textContent = text;
+    };
+
+    const parseResponseBody = async (res) => {
+      const raw = await res.text();
+      if (!raw) {
+        return null;
+      }
+      try {
+        return JSON.parse(raw);
+      } catch {
+        return raw;
+      }
+    };
+
+    uploadBtn.addEventListener("click", async () => {
+      if (!dbFile.files || dbFile.files.length === 0) {
+        setStatus(uploadStatus, "bad", "Pick a database file first.");
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append("file", dbFile.files[0]);
+
+      try {
+        setStatus(uploadStatus, "", "Uploading...");
+        const res = await fetch("/databases/upload", { method: "POST", body: fd });
+        const data = await parseResponseBody(res);
+        if (!res.ok) {
+          const detail = data && typeof data === "object" ? data.detail : null;
+          throw new Error(detail || String(data || "Upload failed"));
+        }
+        dbIdInput.value = data.db_id;
+        setStatus(uploadStatus, "ok", `Uploaded. Tables: ${data.tables.join(", ")}`);
+      } catch (err) {
+        setStatus(uploadStatus, "bad", String(err));
+      }
+    });
+
+    connectBtn.addEventListener("click", async () => {
+      const name = connNameInput.value.trim();
+      const dbUrl = connUrlInput.value.trim();
+
+      if (!name || !dbUrl) {
+        setStatus(uploadStatus, "bad", "Enter connection name and database URL.");
+        return;
+      }
+
+      try {
+        setStatus(uploadStatus, "", "Connecting...");
+        const res = await fetch("/databases/connect", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, db_url: dbUrl }),
+        });
+        const data = await parseResponseBody(res);
+        if (!res.ok) {
+          const detail = data && typeof data === "object" ? data.detail : null;
+          throw new Error(detail || String(data || "Connection failed"));
+        }
+        dbIdInput.value = data.db_id;
+        setStatus(uploadStatus, "ok", `Connected. Tables: ${data.tables.join(", ")}`);
+      } catch (err) {
+        setStatus(uploadStatus, "bad", String(err));
+      }
+    });
+
+    schemaBtn.addEventListener("click", async () => {
+      const dbId = dbIdInput.value.trim();
+      if (!dbId) {
+        schemaOutput.innerHTML = '<div class="schema-empty">Enter a database ID.</div>';
+        return;
+      }
+
+      try {
+        const res = await fetch(`/databases/${dbId}/schema`);
+        const data = await parseResponseBody(res);
+        if (!res.ok) {
+          const detail = data && typeof data === "object" ? data.detail : null;
+          throw new Error(detail || String(data || "Could not fetch schema"));
+        }
+        renderSchemaExplorer(data);
+      } catch (err) {
+        schemaOutput.innerHTML = `<div class="schema-empty">${String(err)}</div>`;
+      }
+    });
+
+    const createTurn = (question) => {
+      const turn = document.createElement("div");
+      turn.className = "turn-card";
+      turn.innerHTML = `
+        <p class="turn-question">${question.replace(/</g, "&lt;")}</p>
+        <div class="turn-status"></div>
+        <div class="turn-meta">Final SQL</div>
+        <div class="model-grid" style="grid-template-columns: minmax(0, 1fr);">
+          <div class="model-box">
+            <div class="sql-box-wrap">
+              <button class="sql-inline-copy-final" type="button" title="Copy SQL" aria-label="Copy SQL">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+                  <rect x="4" y="4" width="11" height="11" rx="2"></rect>
+                </svg>
+              </button>
+              <pre class="final-sql">Generating SQL...</pre>
+            </div>
+          </div>
+        </div>
+        <div class="turn-meta">Result Table</div>
+        <div class="turn-table-host"></div>
+      `;
+
+      const copyFinalButton = turn.querySelector(".sql-inline-copy-final");
+      const finalSql = turn.querySelector(".final-sql");
+      const status = turn.querySelector(".turn-status");
+      const tableHost = turn.querySelector(".turn-table-host");
+
+      copyFinalButton.addEventListener("click", async () => {
+        const sqlText = finalSql.textContent.trim();
+        if (!sqlText || sqlText === "Generating SQL...") {
+          status.className = "turn-status bad";
+          status.textContent = "No final SQL available yet.";
+          return;
+        }
+        try {
+          await navigator.clipboard.writeText(sqlText);
+          status.className = "turn-status ok";
+          status.textContent = "Final SQL copied to clipboard.";
+          const originalTitle = copyFinalButton.title;
+          copyFinalButton.title = "Copied";
+          window.setTimeout(() => {
+            copyFinalButton.title = originalTitle;
+          }, 900);
+        } catch (err) {
+          status.className = "turn-status bad";
+          status.textContent = `Failed to copy SQL: ${String(err)}`;
+        }
+      });
+
+      return { turn, finalSql, status, tableHost };
+    };
+
+    askBtn.addEventListener("click", async () => {
+      const dbId = dbIdInput.value.trim();
+      const question = currentQuestionInput.value.trim();
+
+      if (!dbId || !question) {
+        alert("Database ID and question are required.");
+        return;
+      }
+
+      const turnRefs = createTurn(question);
+      threadHost.appendChild(turnRefs.turn);
+      threadHost.scrollTop = threadHost.scrollHeight;
+      currentQuestionInput.value = "";
+      currentQuestionInput.focus();
+
+      try {
+        turnRefs.status.className = "turn-status";
+        turnRefs.status.textContent = "Generating best SQL...";
+
+        const res = await fetch("/query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ db_id: dbId, question }),
+        });
+
+        const data = await parseResponseBody(res);
+        if (!res.ok) {
+          const detail = data && typeof data === "object" ? data.detail : null;
+          if (typeof detail === "string") {
+            throw new Error(detail);
+          }
+          if (detail) {
+            throw new Error(JSON.stringify(detail, null, 2));
+          }
+          throw new Error(String(data || "Query failed"));
+        }
+
+        // Display final selected SQL
+        turnRefs.finalSql.textContent = data.sql || "No SQL generated";
+
+        const hasSql = Boolean(data.sql && String(data.sql).trim().length > 0 && data.sql !== "INVALID_QUERY");
+        const isValid = data.valid === true;
+        if (hasSql && isValid) {
+          turnRefs.status.className = "turn-status ok";
+          turnRefs.status.textContent = "SQL generated successfully.";
+        } else {
+          turnRefs.status.className = "turn-status";
+          if (data.issues && data.issues.length) {
+            turnRefs.status.textContent = data.issues[0];
+          } else {
+            turnRefs.status.textContent = "Could not generate valid SQL for this question.";
+          }
+        }
+
+        if (!data.rows || !data.rows.length) {
+          turnRefs.tableHost.innerHTML = "<div class=\"schema-empty\">No rows returned.</div>";
+          return;
+        }
+
+        const table = document.createElement("table");
+        const head = document.createElement("thead");
+        const headRow = document.createElement("tr");
+        (data.columns || []).forEach((c) => {
+          const th = document.createElement("th");
+          th.textContent = c;
+          headRow.appendChild(th);
+        });
+        head.appendChild(headRow);
+        table.appendChild(head);
+
+        const body = document.createElement("tbody");
+        (data.rows || []).forEach((r) => {
+          const tr = document.createElement("tr");
+          r.forEach((cell) => {
+            const td = document.createElement("td");
+            td.textContent = cell == null ? "NULL" : String(cell);
+            tr.appendChild(td);
+          });
+          body.appendChild(tr);
+        });
+        table.appendChild(body);
+        turnRefs.tableHost.innerHTML = "";
+        turnRefs.tableHost.appendChild(table);
+      } catch (err) {
+        turnRefs.status.className = "turn-status bad";
+        turnRefs.status.textContent = String(err);
+        turnRefs.finalSql.textContent = "Generation failed.";
+        turnRefs.tableHost.innerHTML = "<div class=\"schema-empty\">No result available.</div>";
+      }
+    });
+
+    warmupModelsOnLoad();
+  </script>
+</body>
+</html>
