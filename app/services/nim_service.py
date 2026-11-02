@@ -9,6 +9,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Top-level LangChain imports with graceful fallback
+try:
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+    HAS_LANGCHAIN = True
+except Exception:  # noqa: BLE001
+    HAS_LANGCHAIN = False
+    ChatOpenAI = None  # type: ignore[assignment, misc]
+    HumanMessage = None  # type: ignore[assignment, misc]
+    SystemMessage = None  # type: ignore[assignment, misc]
+
+try:
+    from openai import OpenAI
+except Exception:  # noqa: BLE001
+    OpenAI = None  # type: ignore[assignment, misc]
+
 from app.services.prompt_engine import PromptEngine
 
 logger = logging.getLogger(__name__)
@@ -113,25 +129,29 @@ class NIMSQLService:
         request_timeout = float(os.getenv("NVIDIA_TIMEOUT_SECONDS", "15.0"))
         client_key = f"{target_base_url}:{model_name}"
         if client_key not in self._llm_instances:
-            try:
-                from langchain_openai import ChatOpenAI
-                # Use kwargs unpacking to satisfy type checkers across LangChain versions
-                llm_kwargs: dict[str, Any] = {
-                    "model": model_name,
-                    "openai_api_key": target_api_key,
-                    "openai_api_base": target_base_url,
-                    "temperature": 0.0,
-                    "max_tokens": 1024,
-                    "timeout": request_timeout,
-                    "max_retries": 0,
-                }
-                self._llm_instances[client_key] = ChatOpenAI(**llm_kwargs)
-            except Exception:  # noqa: BLE001
-                from openai import OpenAI
-                client = OpenAI(base_url=target_base_url, api_key=target_api_key, timeout=request_timeout, max_retries=0)
-                self._llm_instances[client_key] = client
+            if HAS_LANGCHAIN and ChatOpenAI is not None:
+                try:
+                    llm_kwargs: dict[str, Any] = {
+                        "model": model_name,
+                        "openai_api_key": target_api_key,
+                        "openai_api_base": target_base_url,
+                        "temperature": 0.0,
+                        "max_tokens": 1024,
+                        "timeout": request_timeout,
+                        "max_retries": 0,
+                    }
+                    self._llm_instances[client_key] = ChatOpenAI(**llm_kwargs)
+                except Exception:  # noqa: BLE001
+                    if OpenAI is not None:
+                        self._llm_instances[client_key] = OpenAI(
+                            base_url=target_base_url, api_key=target_api_key, timeout=request_timeout, max_retries=0
+                        )
+            elif OpenAI is not None:
+                self._llm_instances[client_key] = OpenAI(
+                    base_url=target_base_url, api_key=target_api_key, timeout=request_timeout, max_retries=0
+                )
 
-        return self._llm_instances[client_key]
+        return self._llm_instances.get(client_key)
 
     def generate_sql(
         self,
@@ -153,17 +173,16 @@ class NIMSQLService:
 
         llm = self._get_langchain_client(resolved_model)
 
-        # Execute call via LangChain if available, else OpenAI fallback
-        if hasattr(llm, "invoke"):
-            from langchain_core.messages import HumanMessage, SystemMessage
+        raw_text = ""
+        # Execute call via LangChain if available, else standard OpenAI fallback
+        if HAS_LANGCHAIN and hasattr(llm, "invoke") and SystemMessage is not None and HumanMessage is not None:
             messages = [
                 SystemMessage(content=system_msg),
                 HumanMessage(content=user_msg),
             ]
             response = llm.invoke(messages)
             raw_text = response.content if hasattr(response, "content") else str(response)
-        else:
-            # Fallback to standard OpenAI client
+        elif llm is not None and hasattr(llm, "chat"):
             response = llm.chat.completions.create(
                 model=resolved_model,
                 messages=[
@@ -210,15 +229,15 @@ class NIMSQLService:
 
         llm = self._get_langchain_client(resolved_model)
 
-        if hasattr(llm, "invoke"):
-            from langchain_core.messages import HumanMessage, SystemMessage
+        raw_text = ""
+        if HAS_LANGCHAIN and hasattr(llm, "invoke") and SystemMessage is not None and HumanMessage is not None:
             messages = [
                 SystemMessage(content=system_msg),
                 HumanMessage(content=user_msg),
             ]
             response = llm.invoke(messages)
             raw_text = response.content if hasattr(response, "content") else str(response)
-        else:
+        elif llm is not None and hasattr(llm, "chat"):
             response = llm.chat.completions.create(
                 model=resolved_model,
                 messages=[
