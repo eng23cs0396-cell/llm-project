@@ -398,7 +398,26 @@ def _run_nim_model_query(
     start_total = time.perf_counter()
     resolved_model_name = nim_service.get_model_name(model_choice)
 
-    if not nim_service.is_configured():
+    is_local = model_choice.lower() in ("local", "ollama", "local_ollama", "local_model")
+    if is_local:
+        if not nim_service.is_local_available():
+            return ModelQueryResult(
+                model_name=resolved_model_name,
+                available=False,
+                sql="",
+                valid=False,
+                executed=False,
+                attempts=0,
+                metrics=QueryMetrics(
+                    generation_ms=0.0,
+                    validation_ms=0.0,
+                    execution_ms=0.0,
+                    total_ms=0.0,
+                    attempts=0,
+                ),
+                error=f"Local model endpoint not reachable at {nim_service.local_model_url}",
+            )
+    elif not nim_service.is_configured():
         return ModelQueryResult(
             model_name=resolved_model_name,
             available=False,
@@ -752,21 +771,28 @@ def query_database(request: QueryRequest) -> QueryResponse:
     attempted_results: list[ModelQueryResult] = []
     model_outputs: dict[str, str] = {}
 
-    # 1. Try NVIDIA NIM if requested or if in auto mode and configured
+    # 1. Try Cloud / Local LLM (NVIDIA NIM or Local Ollama)
     use_nim = False
     nim_choice = "primary"
-    if chosen_model in ("primary", "nvidia_primary", "llama", "llama-3.3-70b", "meta/llama-3.3-70b-instruct"):
+    if chosen_model in ("local", "ollama", "local_ollama", "local_model"):
+        use_nim = True
+        nim_choice = "local"
+    elif chosen_model in ("primary", "nvidia_primary", "llama", "llama-3.3-70b", "meta/llama-3.3-70b-instruct"):
         use_nim = True
         nim_choice = "primary"
     elif chosen_model in ("secondary", "nvidia_secondary", "qwen", "coder", "qwen2.5-coder-32b-instruct"):
         use_nim = True
         nim_choice = "secondary"
-    elif chosen_model == "auto" and nim_service.is_configured():
-        use_nim = True
-        nim_choice = "primary"
+    elif chosen_model == "auto":
+        if nim_service.is_configured():
+            use_nim = True
+            nim_choice = "primary"
+        elif nim_service.is_local_available():
+            use_nim = True
+            nim_choice = "local"
 
-    if use_nim and nim_service.is_configured():
-        logger.info(f"[PIPELINE] Attempting NVIDIA NIM with choice: {nim_choice}")
+    if use_nim and (nim_service.is_configured() or nim_choice == "local"):
+        logger.info(f"[PIPELINE] Attempting LLM service with choice: {nim_choice}")
         nim_res = _run_nim_model_query(
             model_choice=nim_choice,
             request=request,

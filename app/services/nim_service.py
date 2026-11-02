@@ -46,12 +46,16 @@ class NIMSQLService:
         base_url: str = "https://integrate.api.nvidia.com/v1",
         primary_model: str = "meta/llama-3.3-70b-instruct",
         secondary_model: str = "qwen/qwen2.5-coder-32b-instruct",
+        local_model_url: str = "http://localhost:11434/v1",
+        local_model_name: str = "llama3:latest",
         prompt_engine: PromptEngine | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("NVIDIA_API_KEY", "").strip()
         self.base_url = base_url or os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
         self.primary_model = primary_model or os.getenv("NVIDIA_PRIMARY_MODEL", "meta/llama-3.3-70b-instruct")
         self.secondary_model = secondary_model or os.getenv("NVIDIA_SECONDARY_MODEL", "qwen/qwen2.5-coder-32b-instruct")
+        self.local_model_url = local_model_url or os.getenv("LOCAL_MODEL_URL", "http://localhost:11434/v1")
+        self.local_model_name = local_model_name or os.getenv("LOCAL_MODEL_NAME", "llama3:latest")
         self.prompt_engine = prompt_engine or PromptEngine()
 
         self._llm_instances: dict[str, Any] = {}
@@ -60,42 +64,57 @@ class NIMSQLService:
         """Returns True if an NVIDIA API key is available."""
         return bool(self.api_key and self.api_key.startswith("nvapi-"))
 
+    def is_local_available(self) -> bool:
+        """Returns True if local Ollama/OpenAI-compatible server is reachable."""
+        try:
+            import urllib.request
+            req = urllib.request.Request(f"{self.local_model_url}/models", headers={"User-Agent": "NL2SQL"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
     def get_model_name(self, model_choice: str | None = None) -> str:
         """Resolve model name from user choice or defaults."""
-        choice = (model_choice or os.getenv("DEFAULT_MODEL_CHOICE", "primary")).lower().strip()
+        choice = (model_choice or os.getenv("DEFAULT_MODEL_CHOICE", "auto")).lower().strip()
+        if choice in ("local", "ollama", "local_ollama", "local_model"):
+            return self.local_model_name
         if choice in ("secondary", "coder", "qwen", "qwen2.5-coder-32b-instruct"):
             return self.secondary_model
         if choice in ("primary", "llama", "llama-3.3-70b-instruct", "auto"):
             return self.primary_model
-        # If user passed a custom model path directly
         return model_choice if model_choice else self.primary_model
 
     def _get_langchain_client(self, model_name: str):
-        """Lazy-initialize LangChain ChatOpenAI client pointing to NVIDIA NIM endpoint."""
-        if not self.is_configured():
+        """Lazy-initialize LangChain ChatOpenAI client pointing to NVIDIA NIM or Local Ollama."""
+        is_local = (model_name == self.local_model_name)
+        target_base_url = self.local_model_url if is_local else self.base_url
+        target_api_key = "ollama" if is_local else self.api_key
+
+        if not is_local and not self.is_configured():
             raise ValueError(
                 "NVIDIA API Key is missing. Set NVIDIA_API_KEY in your .env file with a key starting with 'nvapi-'."
             )
 
-        if model_name not in self._llm_instances:
+        client_key = f"{target_base_url}:{model_name}"
+        if client_key not in self._llm_instances:
             try:
                 from langchain_openai import ChatOpenAI
-                self._llm_instances[model_name] = ChatOpenAI(
+                self._llm_instances[client_key] = ChatOpenAI(
                     model=model_name,
-                    openai_api_key=self.api_key,
-                    openai_api_base=self.base_url,
+                    openai_api_key=target_api_key,
+                    openai_api_base=target_base_url,
                     temperature=0.0,
                     max_tokens=1024,
-                    timeout=30.0,
+                    timeout=45.0,
                     max_retries=2,
                 )
             except ImportError:
-                # Fallback to direct openai client if langchain-openai is not yet installed in active env
                 from openai import OpenAI
-                client = OpenAI(base_url=self.base_url, api_key=self.api_key)
-                self._llm_instances[model_name] = client
+                client = OpenAI(base_url=target_base_url, api_key=target_api_key)
+                self._llm_instances[client_key] = client
 
-        return self._llm_instances[model_name]
+        return self._llm_instances[client_key]
 
     def generate_sql(
         self,
