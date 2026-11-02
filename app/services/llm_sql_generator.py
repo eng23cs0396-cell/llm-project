@@ -18,11 +18,6 @@ from app.services.flan_t5_sql_config import (
     build_prompt as build_flan_t5_model_prompt,
     generation_kwargs as flan_t5_model_generation_kwargs,
 )
-from app.services.adapter_setup import setup_adapters
-from app.services.mistral_7b_sql_config import (
-    build_prompt as build_mistral_model_prompt,
-    generation_kwargs as mistral_model_generation_kwargs,
-)
 from app.services.retrieval_service import RetrievalContext
 from app.storage import DatabaseMetadata
 

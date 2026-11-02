@@ -1,103 +1,123 @@
-# Universal Text-to-SQL System
+# Enterprise Text-to-SQL Engine with NVIDIA NIM, Ollama & LangChain
 
-This project provides a FastAPI app that converts natural language questions into SQL and executes them against uploaded or connected databases.
+An intelligent, multi-engine Text-to-SQL system that translates natural language into accurate SQL queries, executes them against databases (SQLite, DuckDB, etc.), and validates queries with syntax checkers and self-healing error reflection.
 
-## What Happens With Adapters
+---
 
-Model adapters are stored in `training/artifacts`.
+## 🌟 Key Features
 
-To keep the repository size manageable, adapters can be distributed as a Google Drive zip. The app now auto-handles this:
+1. **Multi-Model Inference Architecture:**
+   - **NVIDIA NIM (Cloud):** High-speed LLM inference via NVIDIA NIM API (e.g. `openai/gpt-oss-20b`, `meta/llama-3.1-70b-instruct`).
+   - **Local LLM (Ollama):** Private, offline inference using local Ollama (`http://localhost:11434/v1`) with models like `llama3:latest` or `mistral:7b`.
+   - **Local Fine-Tuned FLAN-T5:** Compact, fast on-premise encoder-decoder fallback.
+   - **Auto Mode:** Automatically routes to NVIDIA NIM if available, seamlessly failing over to local Ollama or heuristics if limits or connectivity issues occur.
 
-1. On startup, the app checks whether expected adapter folders exist.
-2. If missing, it downloads `training/artifacts.zip` from Google Drive.
-3. It extracts the zip at the project root so `training/artifacts/...` is restored.
+2. **LangChain & Advanced Prompt Engineering:**
+   - **Dynamic Few-Shot Learning:** Automatically selects the most relevant Spider and BIRD SQL patterns based on schema similarity and query complexity.
+   - **Dialect Adaptation:** Tailored prompts for SQLite, PostgreSQL, MySQL, and DuckDB.
+   - **Self-Healing Reflection:** When query execution fails, a reflection prompt feeds the exact database error back to the LLM to autonomously correct the SQL.
 
-Configured source:
+3. **Fine-Tuning Pipeline (FLAN-T5):**
+   - **Parameter-Efficient Fine-Tuning (PEFT):** Supports LoRA, Rank-Stabilized LoRA (rsLoRA), and Weight-Decomposed Low-Rank Adaptation (DoRA).
+   - **Google Colab Notebook:** Ready-to-run Jupyter notebook (`training/Fine_Tune_FLAN_T5.ipynb`) with GPU acceleration and dataset preparation.
+   - **Production Training Script:** `training/train_flan_t5_advanced.py`.
 
-- Google Drive file id: `1vfhisRUh-LCl7HBj6uPAQ6bExlCqN6HU`
+---
 
-## Prerequisites
+## 🚀 Quick Start
 
-- Python 3.10
-- Windows PowerShell (for the provided PowerShell commands)
-- Internet access (first run if adapters are not present locally)
+### 1. Prerequisites
+- Python 3.10+
+- (Optional) NVIDIA NIM API Key from [build.nvidia.com](https://build.nvidia.com)
+- (Optional) [Ollama](https://ollama.com/) installed locally for offline generation
 
-## Setup
+### 2. Environment Configuration
+Copy the sample environment file and configure your credentials:
+```bash
+cp .env.example .env
+```
+Edit `.env`:
+```env
+# NVIDIA NIM Settings
+NVIDIA_API_KEY=nvapi-your-key-here
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+NVIDIA_MODEL_NAME=openai/gpt-oss-20b
 
-1. Start the app with the launcher script (recommended):
+# Local Ollama Settings (Optional)
+LOCAL_MODEL_URL=http://localhost:11434/v1
+LOCAL_MODEL_NAME=llama3:latest
 
+# App Settings
+PORT=8000
+```
+
+### 3. Run the Application
+
+Using PowerShell (Windows):
 ```powershell
 .\run_app.ps1
 ```
 
-This script automatically:
-
-- Creates `.venv` (if missing)
-- Upgrades pip
-- Installs dependencies from `requirements.txt`
-- Starts Uvicorn on port `8000`
-
-2. Optional script flags:
-
-```powershell
-.\run_app.ps1 -Port 9000
-.\run_app.ps1 -NoReload
-.\run_app.ps1 -SkipInstall
-.\run_app.ps1 -VenvPath ".venv310-gpu"
-```
-
-3. Manual setup (fallback):
-
-```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+Or manually using Uvicorn:
+```bash
+python -m venv .venv
+# On Windows: .venv\Scripts\activate
+# On Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## Run The App
+Open your browser at:
+- **Interactive Web UI:** [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- **API Documentation (Swagger):** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **Model Status:** [http://127.0.0.1:8000/models/status](http://127.0.0.1:8000/models/status)
 
-Recommended:
+---
 
-```powershell
-.\run_app.ps1
+## 📂 Project Structure
+
+```text
+├── app/
+│   ├── main.py                     # FastAPI application endpoints & routing
+│   ├── models.py                   # Pydantic schemas (requests, responses, model selection)
+│   ├── storage.py                  # Database metadata and schema storage
+│   ├── static/
+│   │   └── index.html              # Modern web interface with model selector
+│   └── services/
+│       ├── nim_service.py          # LangChain ChatOpenAI client for NIM & Ollama
+│       ├── prompt_engine.py        # Dynamic few-shot selector and dialect prompts
+│       ├── retry_engine.py         # Self-healing SQL reflection loop
+│       ├── schema_service.py       # Table and column schema extraction
+│       ├── sql_validator.py        # SQL syntax and security validation
+│       ├── sql_semantic_guard.py   # Guardrails preventing destructive operations
+│       ├── retrieval_service.py    # Schema embedding and vector similarity search
+│       └── llm_sql_generator.py    # Local FLAN-T5 generator and routing logic
+├── training/
+│   ├── Fine_Tune_FLAN_T5.ipynb     # Interactive Google Colab notebook for LoRA/DoRA
+│   ├── train_flan_t5_advanced.py   # Standalone FLAN-T5 fine-tuning pipeline
+│   ├── prepare_mixture.py          # Spider & BIRD dataset formatting script
+│   └── data/                       # Training mixtures
+├── run_app.ps1                     # PowerShell launch helper
+├── requirements.txt                # Python dependencies
+├── .env.example                    # Sample environment variables
+└── README.md
 ```
 
-Manual:
+---
 
-```powershell
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
+## 🧪 Model Training & Fine-Tuning
 
-Open:
+To fine-tune FLAN-T5 on your own Text-to-SQL datasets:
 
-- UI: `http://127.0.0.1:8000/`
-- Health: `http://127.0.0.1:8000/health`
-- Model status: `http://127.0.0.1:8000/models/status`
+1. **Via Google Colab (Recommended for Free GPUs):**
+   Open `training/Fine_Tune_FLAN_T5.ipynb` in [Google Colab](https://colab.research.google.com/), select a T4 GPU runtime, and run all cells.
 
-## Typical Usage
-
-1. Upload a `.db`, `.sqlite`, `.sqlite3`, or `.duckdb` file using the UI.
-2. Ask a natural-language question.
-3. Review generated SQL and execution output.
-
-## Training Scripts
-
-Available scripts in `training/`:
-
-- `prepare_mixture.py`
-- `train_lora.py`
-- `train_mistral_qlora.py`
-- `start_fast_track.ps1`
-
-Example (PowerShell):
-
-```powershell
-.\training\start_fast_track.ps1 -BirdLocal "C:\path\to\bird" -PythonExe "python"
-```
-
-## Notes
-
-- If adapter download fails, check internet connectivity and Google Drive file permissions.
-- The project expects adapters under `training/artifacts/flan_t5_sql_lora/final` and `training/artifacts/mistral_7b_sql_lora/final`.
-- PyTorch CUDA wheels are configured via `--extra-index-url` in `requirements.txt`.
+2. **Via Local Command Line:**
+   ```bash
+   python training/train_flan_t5_advanced.py \
+       --train-file training/data/mixture_train.jsonl \
+       --base-model google/flan-t5-base \
+       --output-dir training/artifacts/flan-t5-advanced \
+       --peft-type lora \
+       --epochs 3
+   ```

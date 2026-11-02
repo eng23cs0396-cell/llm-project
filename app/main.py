@@ -31,7 +31,6 @@ from app.models import (
 )
 from app.services.embedding_service import EmbeddingService
 from app.services.executor import SQLExecutor
-from app.services.adapter_setup import setup_adapters
 from app.services.retrieval_service import RetrievalService
 from app.services.retry_engine import RetryEngine
 from app.services.schema_service import SchemaService
@@ -184,7 +183,6 @@ def _is_complex_question(question: str, metadata: DatabaseMetadata) -> bool:
 
 def _build_model_retry_engine(model_path: Path, model_name: str) -> RetryEngine | None:
     """Build a retry engine for a specific model."""
-    setup_adapters(BASE_DIR)
     if LLMSQLGenerator is None:
         logger.warning(f"[MODEL_INIT] LLMSQLGenerator unavailable, cannot load {model_name}")
         return None
@@ -596,7 +594,6 @@ def _query_response_from_result(
 @app.on_event("startup")
 async def startup_event() -> None:
     """Load models at startup."""
-    setup_adapters(BASE_DIR)
     _warmup_models()
 
 
