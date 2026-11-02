@@ -5,6 +5,10 @@ import os
 import re
 from typing import Any, Literal
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from app.services.prompt_engine import PromptEngine
 
 logger = logging.getLogger(__name__)
@@ -43,17 +47,26 @@ class NIMSQLService:
     def __init__(
         self,
         api_key: str | None = None,
-        base_url: str = "https://integrate.api.nvidia.com/v1",
-        primary_model: str = "meta/llama-3.3-70b-instruct",
-        secondary_model: str = "qwen/qwen2.5-coder-32b-instruct",
-        local_model_url: str = "http://localhost:11434/v1",
-        local_model_name: str = "llama3:latest",
+        base_url: str | None = None,
+        primary_model: str | None = None,
+        secondary_model: str | None = None,
+        local_model_url: str | None = None,
+        local_model_name: str | None = None,
         prompt_engine: PromptEngine | None = None,
     ) -> None:
         self.api_key = api_key or os.getenv("NVIDIA_API_KEY", "").strip()
         self.base_url = base_url or os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        self.primary_model = primary_model or os.getenv("NVIDIA_PRIMARY_MODEL", "meta/llama-3.3-70b-instruct")
-        self.secondary_model = secondary_model or os.getenv("NVIDIA_SECONDARY_MODEL", "qwen/qwen2.5-coder-32b-instruct")
+        self.primary_model = (
+            primary_model
+            or os.getenv("NVIDIA_PRIMARY_MODEL")
+            or os.getenv("NVIDIA_MODEL_NAME")
+            or "openai/gpt-oss-20b"
+        )
+        self.secondary_model = (
+            secondary_model
+            or os.getenv("NVIDIA_SECONDARY_MODEL")
+            or "openai/gpt-oss-20b"
+        )
         self.local_model_url = local_model_url or os.getenv("LOCAL_MODEL_URL", "http://localhost:11434/v1")
         self.local_model_name = local_model_name or os.getenv("LOCAL_MODEL_NAME", "llama3:latest")
         self.prompt_engine = prompt_engine or PromptEngine()
@@ -96,6 +109,7 @@ class NIMSQLService:
                 "NVIDIA API Key is missing. Set NVIDIA_API_KEY in your .env file with a key starting with 'nvapi-'."
             )
 
+        request_timeout = float(os.getenv("NVIDIA_TIMEOUT_SECONDS", "15.0"))
         client_key = f"{target_base_url}:{model_name}"
         if client_key not in self._llm_instances:
             try:
@@ -105,13 +119,13 @@ class NIMSQLService:
                     openai_api_key=target_api_key,
                     openai_api_base=target_base_url,
                     temperature=0.0,
-                    max_tokens=2048,
-                    timeout=120.0,
-                    max_retries=2,
+                    max_tokens=1024,
+                    timeout=request_timeout,
+                    max_retries=0,
                 )
             except ImportError:
                 from openai import OpenAI
-                client = OpenAI(base_url=target_base_url, api_key=target_api_key, timeout=120.0)
+                client = OpenAI(base_url=target_base_url, api_key=target_api_key, timeout=request_timeout, max_retries=0)
                 self._llm_instances[client_key] = client
 
         return self._llm_instances[client_key]
