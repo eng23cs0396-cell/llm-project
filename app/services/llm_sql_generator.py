@@ -972,24 +972,20 @@ class LLMSQLGenerator:
         bundles = self._load_bundles()
 
         if is_simple:
-            # Try Flan-family models first for simple queries
+            # Try models for simple queries
             for bundle in bundles:
-                if bundle.model_key == "mistral_7b":
-                    continue
                 try:
                     sql = self._generate_with_bundle(bundle, question, metadata, context)
                     if sql:
-                        logger.info("[SIMPLE PATH] Using Flan-only result")
+                        logger.info("[SIMPLE PATH] Using local model result")
                         return sql
                 except Exception as e:
                     logger.error(f"{bundle.model_key} failed on simple query: {e}")
 
-            logger.debug("[SIMPLE PATH] Flan models produced no acceptable SQL; falling back to complex path")
+            logger.debug("[SIMPLE PATH] Local models produced no acceptable SQL; falling back to complex path")
 
-        # Default complex path: try all bundles (Flan first, then Mistral)
-        # Ensure Flan models are attempted before Mistral for best single-model coverage
-        bundles_sorted = sorted(bundles, key=lambda b: 0 if b.model_key != "mistral_7b" else 1)
-        for bundle in bundles_sorted:
+        # Complex path: try all loaded model bundles
+        for bundle in bundles:
             try:
                 sql = self._generate_with_bundle(bundle, question, metadata, context)
                 if sql:
@@ -1049,61 +1045,25 @@ class LLMSQLGenerator:
     def _generate_with_bundle(self, bundle, question, metadata, context):
         schema_lines = self._build_schema_lines(metadata, context)
 
-        if bundle.model_key == "mistral_7b":
-            system_text, user_text = build_mistral_model_prompt(
-                question=question,
-                schema_text="; ".join(schema_lines),
-                table_hints_text="",
-                repair=False,
-                error_message="",
-                previous_sql="",
-                examples_text="",
-            )
-            # Mistral requires proper chat format: [INST] system + user [/INST]
-            prompt = f"[INST] <<SYS>>\n{system_text}\n<</SYS>>\n\n{user_text} [/INST]"
-            generation_kwargs = mistral_model_generation_kwargs(160)
-        else:
-            prompt = build_flan_t5_model_prompt(
-                question=question,
-                schema_text="; ".join(schema_lines),
-                table_hints_text="",
-                repair=False,
-                error_message="",
-                previous_sql="",
-                examples_text="",
-            )
-            generation_kwargs = flan_t5_model_generation_kwargs(64)
+        prompt = build_flan_t5_model_prompt(
+            question=question,
+            schema_text="; ".join(schema_lines),
+            table_hints_text="",
+            repair=False,
+            error_message="",
+            previous_sql="",
+            examples_text="",
+        )
+        generation_kwargs = flan_t5_model_generation_kwargs(64)
 
         tokenizer = bundle.tokenizer
         model = bundle.model
 
-        if bundle.model_key == "mistral_7b" and torch.cuda.is_available():
-            try:
-                if getattr(model, "device", None) is None or str(model.device) != "cuda:0":
-                    model = model.to("cuda")
-                    bundle.model = model
-                    logger.info("[MISTRAL] Moved model to CUDA")
-            except Exception as exc:
-                logger.warning(f"[MISTRAL] Could not move model to CUDA: {exc}")
-
-        # Tokenize with model-specific max_length: Mistral supports longer sequences
-        if bundle.model_key == "mistral_7b":
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
-        else:
-            inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+        inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
         outputs = model.generate(**inputs, **generation_kwargs)
-        if bundle.model_key == "mistral_7b":
-            prompt_len = int(inputs["input_ids"].shape[1])
-            output_len = int(outputs[0].shape[0])
-            generated_ids = outputs[0][prompt_len:]
-            # For Mistral, decode without special tokens stripped first
-            decoded = tokenizer.decode(generated_ids, skip_special_tokens=False)
-            # Clean up EOS token and other markers
-            decoded = decoded.replace('</s>', '').strip()
-        else:
-            decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        decoded = tokenizer.decode(outputs[0], skip_special_tokens=True)
 
         # Initialize last-trace storage for debugging/provenance
         try:
@@ -1219,79 +1179,31 @@ class LLMSQLGenerator:
         if self._bundles:
             return self._bundles
 
-        project_root = Path(__file__).resolve().parents[2]
-        setup_adapters(project_root)
-
         from peft import PeftModel
-        from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSeq2SeqLM, BitsAndBytesConfig
+        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"[LLM_SQL_GENERATOR] Loading local model on device: {device}")
 
-        def infer_model_key(path: str) -> str:
-            p = Path(path)
-
-            # 1) Detect via config.json model_type/architectures
-            try:
-                cfg_path = p / "config.json"
-                if cfg_path.exists():
-                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-                    model_type = str(cfg.get("model_type", "")).lower()
-                    arches = [str(a).lower() for a in cfg.get("architectures", [])]
-                    if model_type == "mistral" or any("mistral" in a for a in arches):
-                        return "mistral_7b"
-            except Exception:
-                pass
-
-            # 2) Detect via adapter_config base model name
-            try:
-                adapter_cfg_path = p / "adapter_config.json"
-                if adapter_cfg_path.exists():
-                    adapter_cfg = json.loads(adapter_cfg_path.read_text(encoding="utf-8"))
-                    base_name = str(adapter_cfg.get("base_model_name_or_path", "")).lower()
-                    if "mistral" in base_name:
-                        return "mistral_7b"
-            except Exception:
-                pass
-
-            # 3) Fallback to path heuristic
-            return "mistral_7b" if "mistral" in path.lower() else "flan_t5"
-
         bundles = []
         for path in self.model_paths:
-            model_key = infer_model_key(path)
-            tokenizer = AutoTokenizer.from_pretrained(path)
-            if model_key == "mistral_7b":
-                if not torch.cuda.is_available():
-                    logger.warning("[LLM_SQL_GENERATOR] Mistral 7B requires CUDA GPU, skipping...")
-                    continue
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=True,
-                    bnb_4bit_quant_type="nf4",
-                    bnb_4bit_use_double_quant=False,
-                    bnb_4bit_compute_dtype=torch.float16,
-                )
-                model = AutoModelForCausalLM.from_pretrained(
-                    path,
-                    device_map="auto",
-                    quantization_config=quantization_config,
-                    low_cpu_mem_usage=True,
-                )
-                family = "causal"
-            else:
-                adapter_config_path = Path(path) / "adapter_config.json"
-                if adapter_config_path.exists():
+            p = Path(path)
+            adapter_config_path = p / "adapter_config.json"
+            if adapter_config_path.exists():
+                try:
                     adapter_cfg = json.loads(adapter_config_path.read_text(encoding="utf-8"))
                     base_model_name = adapter_cfg.get("base_model_name_or_path", "google/flan-t5-small")
-                else:
+                except Exception:
                     base_model_name = "google/flan-t5-small"
-
+                tokenizer = AutoTokenizer.from_pretrained(path if (p / "tokenizer_config.json").exists() else base_model_name)
                 base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
                 model = PeftModel.from_pretrained(base_model, path)
-                family = "seq2seq"
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(path)
+                model = AutoModelForSeq2SeqLM.from_pretrained(path)
 
-            if model_key != "mistral_7b":
-                model = model.to(device)
+            family = "seq2seq"
+            model = model.to(device)
             model.eval()
 
             bundles.append(_ModelBundle(
@@ -1299,7 +1211,7 @@ class LLMSQLGenerator:
                 model=model,
                 family=family,
                 model_path=path,
-                model_key=model_key,
+                model_key="flan_t5",
             ))
 
         self._bundles = bundles
