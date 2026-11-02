@@ -54,22 +54,22 @@ class NIMSQLService:
         local_model_name: str | None = None,
         prompt_engine: PromptEngine | None = None,
     ) -> None:
-        self.api_key = api_key or os.getenv("NVIDIA_API_KEY", "").strip()
-        self.base_url = base_url or os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1")
-        self.primary_model = (
+        self.api_key: str = api_key or os.getenv("NVIDIA_API_KEY", "").strip()
+        self.base_url: str = base_url or os.getenv("NVIDIA_BASE_URL") or "https://integrate.api.nvidia.com/v1"
+        self.primary_model: str = (
             primary_model
             or os.getenv("NVIDIA_PRIMARY_MODEL")
             or os.getenv("NVIDIA_MODEL_NAME")
             or "openai/gpt-oss-20b"
         )
-        self.secondary_model = (
+        self.secondary_model: str = (
             secondary_model
             or os.getenv("NVIDIA_SECONDARY_MODEL")
             or "openai/gpt-oss-20b"
         )
-        self.local_model_url = local_model_url or os.getenv("LOCAL_MODEL_URL", "http://localhost:11434/v1")
-        self.local_model_name = local_model_name or os.getenv("LOCAL_MODEL_NAME", "llama3:latest")
-        self.prompt_engine = prompt_engine or PromptEngine()
+        self.local_model_url: str = local_model_url or os.getenv("LOCAL_MODEL_URL") or "http://localhost:11434/v1"
+        self.local_model_name: str = local_model_name or os.getenv("LOCAL_MODEL_NAME") or "llama3:latest"
+        self.prompt_engine: PromptEngine = prompt_engine or PromptEngine()
 
         self._llm_instances: dict[str, Any] = {}
 
@@ -83,22 +83,23 @@ class NIMSQLService:
             import urllib.request
             req = urllib.request.Request(f"{self.local_model_url}/models", headers={"User-Agent": "NL2SQL"})
             with urllib.request.urlopen(req, timeout=1.5) as resp:
-                return resp.status == 200
-        except Exception:
+                return bool(resp.status == 200)
+        except Exception:  # noqa: BLE001
             return False
 
     def get_model_name(self, model_choice: str | None = None) -> str:
         """Resolve model name from user choice or defaults."""
-        choice = (model_choice or os.getenv("DEFAULT_MODEL_CHOICE", "auto")).lower().strip()
+        raw_choice = model_choice or os.getenv("DEFAULT_MODEL_CHOICE") or "auto"
+        choice = raw_choice.lower().strip()
         if choice in ("local", "ollama", "local_ollama", "local_model"):
             return self.local_model_name
         if choice in ("secondary", "coder", "qwen", "qwen2.5-coder-32b-instruct"):
             return self.secondary_model
         if choice in ("primary", "llama", "llama-3.3-70b-instruct", "auto"):
             return self.primary_model
-        return model_choice if model_choice else self.primary_model
+        return model_choice or self.primary_model
 
-    def _get_langchain_client(self, model_name: str):
+    def _get_langchain_client(self, model_name: str) -> Any:
         """Lazy-initialize LangChain ChatOpenAI client pointing to NVIDIA NIM or Local Ollama."""
         is_local = (model_name == self.local_model_name)
         target_base_url = self.local_model_url if is_local else self.base_url
@@ -114,16 +115,18 @@ class NIMSQLService:
         if client_key not in self._llm_instances:
             try:
                 from langchain_openai import ChatOpenAI
-                self._llm_instances[client_key] = ChatOpenAI(
-                    model=model_name,
-                    openai_api_key=target_api_key,
-                    openai_api_base=target_base_url,
-                    temperature=0.0,
-                    max_tokens=1024,
-                    timeout=request_timeout,
-                    max_retries=0,
-                )
-            except ImportError:
+                # Use kwargs unpacking to satisfy type checkers across LangChain versions
+                llm_kwargs: dict[str, Any] = {
+                    "model": model_name,
+                    "openai_api_key": target_api_key,
+                    "openai_api_base": target_base_url,
+                    "temperature": 0.0,
+                    "max_tokens": 1024,
+                    "timeout": request_timeout,
+                    "max_retries": 0,
+                }
+                self._llm_instances[client_key] = ChatOpenAI(**llm_kwargs)
+            except Exception:  # noqa: BLE001
                 from openai import OpenAI
                 client = OpenAI(base_url=target_base_url, api_key=target_api_key, timeout=request_timeout, max_retries=0)
                 self._llm_instances[client_key] = client
@@ -169,7 +172,8 @@ class NIMSQLService:
                 ],
                 temperature=0.0,
             )
-            raw_text = response.choices[0].message.content
+            msg = response.choices[0].message
+            raw_text = msg.content or getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", "") or ""
 
         clean_sql = extract_sql_from_text(raw_text)
 
@@ -223,7 +227,8 @@ class NIMSQLService:
                 ],
                 temperature=0.0,
             )
-            raw_text = response.choices[0].message.content
+            msg = response.choices[0].message
+            raw_text = msg.content or getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", "") or ""
 
         repaired_sql = extract_sql_from_text(raw_text)
 
