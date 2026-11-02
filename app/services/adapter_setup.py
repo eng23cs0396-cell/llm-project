@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -31,9 +32,16 @@ def setup_adapters(base_dir: str | Path, *, force: bool = False) -> bool:
     root_dir = Path(base_dir).resolve()
     expected_paths = _expected_adapter_paths(root_dir)
 
+    auto_download = os.getenv("AUTO_DOWNLOAD_ADAPTERS", "").lower() in ("1", "true", "yes")
+    nvidia_key = os.getenv("NVIDIA_API_KEY", "").strip()
+
     if not force and all(path.exists() for path in expected_paths):
         logger.info("[ADAPTER_SETUP] Artifacts already present")
         return True
+
+    if not force and not auto_download and nvidia_key:
+        logger.info("[ADAPTER_SETUP] NVIDIA NIM configured; skipping local adapter zip download")
+        return False
 
     zip_output = root_dir / "training" / "artifacts.zip"
     zip_output.parent.mkdir(parents=True, exist_ok=True)

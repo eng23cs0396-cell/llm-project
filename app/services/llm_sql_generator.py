@@ -1230,8 +1230,8 @@ class LLMSQLGenerator:
         from peft import PeftModel
         from transformers import AutoTokenizer, AutoModelForCausalLM, AutoModelForSeq2SeqLM, BitsAndBytesConfig
 
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for LLMSQLGenerator but torch.cuda.is_available() is False")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"[LLM_SQL_GENERATOR] Loading local model on device: {device}")
 
         def infer_model_key(path: str) -> str:
             p = Path(path)
@@ -1267,6 +1267,9 @@ class LLMSQLGenerator:
             model_key = infer_model_key(path)
             tokenizer = AutoTokenizer.from_pretrained(path)
             if model_key == "mistral_7b":
+                if not torch.cuda.is_available():
+                    logger.warning("[LLM_SQL_GENERATOR] Mistral 7B requires CUDA GPU, skipping...")
+                    continue
                 quantization_config = BitsAndBytesConfig(
                     load_in_4bit=True,
                     bnb_4bit_quant_type="nf4",
@@ -1293,7 +1296,7 @@ class LLMSQLGenerator:
                 family = "seq2seq"
 
             if model_key != "mistral_7b":
-                model = model.to("cuda")
+                model = model.to(device)
             model.eval()
 
             bundles.append(_ModelBundle(

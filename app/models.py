@@ -26,6 +26,7 @@ class QueryRequest(BaseModel):
     db_id: str = Field(..., description="Database identifier returned by upload")
     question: str = Field(..., min_length=3, description="Natural language question")
     max_rows: int = Field(default=1000, ge=1, le=10000)
+    model: str | None = Field(default=None, description="Model choice: 'nvidia_primary', 'nvidia_secondary', 'flan_t5', or 'auto'")
 
 
 class ValidationIssue(BaseModel):

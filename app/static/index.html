@@ -432,6 +432,16 @@
         <div id="threadHost" class="thread-host"></div>
 
         <div class="composer">
+          <div style="margin-bottom: 0.65rem;">
+            <label for="modelSelect">Engine & Model</label>
+            <select id="modelSelect" style="width: 100%; border: 1px solid var(--border); border-radius: 10px; padding: 0.6rem 0.7rem; outline: none; background: #fff; font-family: inherit;">
+              <option value="auto">Auto (Recommended: NVIDIA NIM SOTA -> Fallback)</option>
+              <option value="nvidia_primary">NVIDIA NIM: Llama 3.3 70B (Complex Reasoning & Joins)</option>
+              <option value="nvidia_secondary">NVIDIA NIM: Qwen 2.5 Coder 32B (SQL Specialist)</option>
+              <option value="flan_t5">Local Model: FLAN-T5 (Offline fallback)</option>
+            </select>
+          </div>
+
           <label for="currentQuestion">Natural language question</label>
           <textarea id="currentQuestion" placeholder="Example: Show top 10 customers by total spending"></textarea>
 
@@ -725,10 +735,11 @@
         turnRefs.status.className = "turn-status";
         turnRefs.status.textContent = "Generating best SQL...";
 
+        const selectedModel = document.getElementById("modelSelect") ? document.getElementById("modelSelect").value : "auto";
         const res = await fetch("/query", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ db_id: dbId, question }),
+          body: JSON.stringify({ db_id: dbId, question, model: selectedModel }),
         });
 
         const data = await parseResponseBody(res);
@@ -748,15 +759,16 @@
 
         const hasSql = Boolean(data.sql && String(data.sql).trim().length > 0 && data.sql !== "INVALID_QUERY");
         const isValid = data.valid === true;
+        const modelLabel = data.model_used ? ` [${data.model_used}]` : "";
         if (hasSql && isValid) {
           turnRefs.status.className = "turn-status ok";
-          turnRefs.status.textContent = "SQL generated successfully.";
+          turnRefs.status.textContent = `SQL generated successfully${modelLabel}.`;
         } else {
           turnRefs.status.className = "turn-status";
           if (data.issues && data.issues.length) {
-            turnRefs.status.textContent = data.issues[0];
+            turnRefs.status.textContent = `${data.issues[0]}${modelLabel}`;
           } else {
-            turnRefs.status.textContent = "Could not generate valid SQL for this question.";
+            turnRefs.status.textContent = `Could not generate valid SQL for this question${modelLabel}.`;
           }
         }
 

@@ -56,10 +56,14 @@ except Exception as exc:
 
 # Use the validated rule-based generator as fallback.
 from app.services.sql_generator import SQLGenerator
+from app.services.prompt_engine import PromptEngine
+from app.services.nim_service import NIMSQLService
 
 _rule_gen = SQLGenerator()
+prompt_engine = PromptEngine()
+nim_service = NIMSQLService(prompt_engine=prompt_engine)
 
-app = FastAPI(title="NL-to-SQL Service", version="0.1.0")
+app = FastAPI(title="NL-to-SQL Service", version="0.2.0")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 UPLOAD_DIR = BASE_DIR / "data" / "uploads"
@@ -220,12 +224,16 @@ def _warmup_models() -> None:
             logger.info("[WARMUP] Models already loaded")
             return
         
-        _mark_warmup_state("loading", "initializing models")
-        
+        if nim_service.is_configured():
+            logger.info(f"[WARMUP] NVIDIA NIM is configured ({nim_service.primary_model})")
+            _mark_warmup_state("ready", f"NVIDIA NIM Ready ({nim_service.primary_model})")
+            return
+
         try:
             # Load FLAN-T5 first (optimized for basic queries)
-            logger.info(f"[WARMUP] Loading FLAN-T5 from {flan_model_dir}")
-            _model_cache["flan_t5"] = _build_model_retry_engine(flan_model_dir, "FLAN-T5")
+            if flan_model_dir.exists():
+                logger.info(f"[WARMUP] Loading FLAN-T5 from {flan_model_dir}")
+                _model_cache["flan_t5"] = _build_model_retry_engine(flan_model_dir, "FLAN-T5")
             
             # Then Mistral
             logger.info(f"[WARMUP] Loading Mistral-7B from {mistral_model_dir}")
@@ -379,6 +387,160 @@ def _run_single_model_query(
         )
 
 
+def _run_nim_model_query(
+    *,
+    model_choice: str,
+    request: QueryRequest,
+    metadata: DatabaseMetadata,
+    few_shot_k: int = 3,
+) -> ModelQueryResult:
+    """Run generation pipeline using NVIDIA NIM API with dynamic few-shot prompting and self-healing reflection."""
+    start_total = time.perf_counter()
+    resolved_model_name = nim_service.get_model_name(model_choice)
+
+    if not nim_service.is_configured():
+        return ModelQueryResult(
+            model_name=resolved_model_name,
+            available=False,
+            sql="",
+            valid=False,
+            executed=False,
+            attempts=0,
+            metrics=QueryMetrics(
+                generation_ms=0.0,
+                validation_ms=0.0,
+                execution_ms=0.0,
+                total_ms=0.0,
+                attempts=0,
+            ),
+            error="NVIDIA API Key not configured in .env",
+        )
+
+    try:
+        start_gen = time.perf_counter()
+        gen_res = nim_service.generate_sql(
+            question=request.question,
+            schema=metadata.schema,
+            dialect=metadata.db_type,
+            model_choice=model_choice,
+            few_shot_k=few_shot_k,
+        )
+        generation_ms = (time.perf_counter() - start_gen) * 1000
+        sql = gen_res.get("sql", "").strip()
+
+        start_val = time.perf_counter()
+        val_issues = validator.validate(sql, metadata.schema, dialect=metadata.db_type)
+        validation_ms = (time.perf_counter() - start_val) * 1000
+        issue_messages = [i.message for i in val_issues if i.level == "error"]
+
+        executed = False
+        execution_ms = 0.0
+        columns = []
+        rows = []
+        row_count = 0
+        truncated = False
+        execution_error = ""
+        attempts = 1
+
+        if sql and not issue_messages:
+            try:
+                start_exec = time.perf_counter()
+                result = executor.execute(
+                    db_path=str(metadata.file_path) if metadata.file_path is not None else None,
+                    sql=sql,
+                    max_rows=request.max_rows,
+                    db_type=metadata.db_type,
+                    connection_url=metadata.connection_url,
+                )
+                execution_ms = (time.perf_counter() - start_exec) * 1000
+                executed = True
+                columns = result.columns
+                rows = result.rows
+                row_count = result.row_count
+                truncated = result.truncated
+            except Exception as exc:
+                execution_error = str(exc)
+                logger.info(f"[NIM] Execution failed ({exc}), attempting self-healing reflection...")
+
+                # Self-healing reflection loop
+                try:
+                    attempts = 2
+                    repaired = nim_service.repair_sql(
+                        question=request.question,
+                        failed_sql=sql,
+                        error_message=execution_error,
+                        schema=metadata.schema,
+                        dialect=metadata.db_type,
+                        model_choice=model_choice,
+                    )
+                    sql = repaired.get("sql", sql).strip()
+                    start_exec = time.perf_counter()
+                    result = executor.execute(
+                        db_path=str(metadata.file_path) if metadata.file_path is not None else None,
+                        sql=sql,
+                        max_rows=request.max_rows,
+                        db_type=metadata.db_type,
+                        connection_url=metadata.connection_url,
+                    )
+                    execution_ms = (time.perf_counter() - start_exec) * 1000
+                    executed = True
+                    columns = result.columns
+                    rows = result.rows
+                    row_count = result.row_count
+                    truncated = result.truncated
+                    execution_error = ""
+                    logger.info("[NIM] Self-healing reflection succeeded! Corrected SQL executed successfully.")
+                except Exception as repair_exc:
+                    execution_error = str(repair_exc)
+                    logger.warning(f"[NIM] Self-healing reflection failed: {repair_exc}")
+
+        total_ms = (time.perf_counter() - start_total) * 1000
+
+        return ModelQueryResult(
+            model_name=resolved_model_name,
+            available=True,
+            sql=sql,
+            valid=executed or (len(issue_messages) == 0 and bool(sql)),
+            executed=executed,
+            attempts=attempts,
+            metrics=QueryMetrics(
+                generation_ms=generation_ms,
+                validation_ms=validation_ms,
+                execution_ms=execution_ms,
+                total_ms=total_ms,
+                attempts=attempts,
+            ),
+            columns=columns,
+            rows=rows,
+            row_count=row_count,
+            truncated=truncated,
+            issues=issue_messages,
+            error=execution_error or None,
+            trace={
+                "raw_output": gen_res.get("raw_output", ""),
+                "few_shot_categories": gen_res.get("few_shot_categories", []),
+            },
+        )
+    except Exception as exc:
+        logger.error(f"[NIM] Query generation exception: {exc}")
+        return ModelQueryResult(
+            model_name=resolved_model_name,
+            available=False,
+            sql="",
+            valid=False,
+            executed=False,
+            attempts=0,
+            metrics=QueryMetrics(
+                generation_ms=0.0,
+                validation_ms=0.0,
+                execution_ms=0.0,
+                total_ms=(time.perf_counter() - start_total) * 1000,
+                attempts=0,
+            ),
+            error=str(exc),
+        )
+
+
 def _score_result(result: ModelQueryResult) -> tuple:
     """Score a model result for selection."""
     return (
@@ -440,10 +602,14 @@ def model_status() -> dict:
     return {
         "status": _model_warmup_state.get("status", "idle"),
         "message": _model_warmup_state.get("message", "models not loaded"),
+        "nvidia_configured": nim_service.is_configured(),
         "models": {
+            "nvidia_primary": nim_service.primary_model,
+            "nvidia_secondary": nim_service.secondary_model,
             "flan_t5": _model_cache.get("flan_t5") is not None,
-            "mistral_7b": _model_cache.get("mistral_7b") is not None,
+            "rule_based": True,
         },
+        "default_model": os.getenv("DEFAULT_MODEL_CHOICE", "auto"),
     }
 
 
@@ -580,76 +746,123 @@ def query_database(request: QueryRequest) -> QueryResponse:
     # - simple query: FLAN-T5 only
     # - complex query: FLAN-T5 -> Mistral
     max_attempts = int(os.getenv("SQL_MAX_ATTEMPTS", "2"))
-    # Decide complexity using schema-aware classifier
-    is_simple_query = not _is_complex_question(request.question, metadata)
-    
-    # Initialize FLAN always; initialize Mistral only when needed.
-    flan_engine = _get_or_init_model_retry_engine("flan_t5")
-    mistral_engine = None if is_simple_query else _get_or_init_model_retry_engine("mistral_7b")
-    
-    logger.info(f"[PIPELINE] FLAN-T5 engine available: {flan_engine is not None}")
-    logger.info(f"[PIPELINE] Mistral-7B engine available: {mistral_engine is not None}")
-    logger.info(f"[PIPELINE] Simple query mode: {is_simple_query}")
-    
-    candidates: list[tuple[str, RetryEngine | None, int]] = [
-        ("flan_t5", flan_engine, max_attempts),
-    ]
-    if not is_simple_query:
-        candidates.append(("mistral_7b", mistral_engine, max_attempts))
-    
+    few_shot_k = int(os.getenv("FEW_SHOT_MAX_EXAMPLES", "3"))
+    chosen_model = (request.model or os.getenv("DEFAULT_MODEL_CHOICE", "auto")).lower().strip()
+
     attempted_results: list[ModelQueryResult] = []
     model_outputs: dict[str, str] = {}
-    
-    for model_name, model_retry_engine, max_tries in candidates:
-        logger.info(f"[PIPELINE] Trying model: {model_name}, engine available: {model_retry_engine is not None}")
-        
-        result = _run_single_model_query(
-            model_name=model_name,
-            model_retry_engine=model_retry_engine,
+
+    # 1. Try NVIDIA NIM if requested or if in auto mode and configured
+    use_nim = False
+    nim_choice = "primary"
+    if chosen_model in ("primary", "nvidia_primary", "llama", "llama-3.3-70b", "meta/llama-3.3-70b-instruct"):
+        use_nim = True
+        nim_choice = "primary"
+    elif chosen_model in ("secondary", "nvidia_secondary", "qwen", "coder", "qwen2.5-coder-32b-instruct"):
+        use_nim = True
+        nim_choice = "secondary"
+    elif chosen_model == "auto" and nim_service.is_configured():
+        use_nim = True
+        nim_choice = "primary"
+
+    if use_nim and nim_service.is_configured():
+        logger.info(f"[PIPELINE] Attempting NVIDIA NIM with choice: {nim_choice}")
+        nim_res = _run_nim_model_query(
+            model_choice=nim_choice,
             request=request,
             metadata=metadata,
-            max_attempts=max_tries,
+            few_shot_k=few_shot_k,
         )
-        attempted_results.append(result)
-        # Include raw LLM output and postprocessed/final SQL for debugging
-        trace = result.trace or {}
-        raw = trace.get("decoded", "") if isinstance(trace, dict) else ""
-        extracted = trace.get("extracted", "") if isinstance(trace, dict) else ""
-        postprocessed = trace.get("postprocessed", "") if isinstance(trace, dict) else ""
-        model_outputs[model_name] = (
-            f"RAW:\n{raw}\n\nEXTRACTED:\n{extracted}\n\nPOSTPROCESSED/FINAL:\n{postprocessed or result.sql}"
+        attempted_results.append(nim_res)
+        model_outputs[nim_res.model_name] = (
+            f"RAW:\n{(nim_res.trace or {}).get('raw_output', '')}\n\nFINAL SQL:\n{nim_res.sql}"
         )
-        
-        logger.info(f"[PIPELINE] {model_name} result: executed={result.executed}, valid={result.valid}, sql_len={len(result.sql)}")
-        logger.info(f"[PIPELINE] {model_name} final SQL: {result.sql}")
-    
-    # Try all models, then pick the best result instead of early exit
-    # This ensures Mistral gets tried even if FLAN's structural repair passes validation
-    
-    # If no model succeeded, pick the best attempt
+
+        # If primary succeeded, return directly
+        if nim_res.executed:
+            response = _query_response_from_result(
+                request=request,
+                result=nim_res,
+                model_outputs=model_outputs,
+            )
+            _query_cache[cache_key] = response
+            return response
+
+        # If primary failed and auto mode is active, try secondary NIM model
+        if chosen_model == "auto" and not nim_res.executed:
+            logger.info("[PIPELINE] Primary NIM failed, trying secondary NVIDIA NIM model...")
+            nim_sec_res = _run_nim_model_query(
+                model_choice="secondary",
+                request=request,
+                metadata=metadata,
+                few_shot_k=few_shot_k,
+            )
+            attempted_results.append(nim_sec_res)
+            model_outputs[nim_sec_res.model_name] = (
+                f"RAW:\n{(nim_sec_res.trace or {}).get('raw_output', '')}\n\nFINAL SQL:\n{nim_sec_res.sql}"
+            )
+            if nim_sec_res.executed:
+                response = _query_response_from_result(
+                    request=request,
+                    result=nim_sec_res,
+                    model_outputs=model_outputs,
+                )
+                _query_cache[cache_key] = response
+                return response
+
+    # 2. Local Model Fallback (FLAN-T5)
+    flan_engine = _get_or_init_model_retry_engine("flan_t5")
+    if flan_engine is not None:
+        logger.info("[PIPELINE] Running Local FLAN-T5 engine...")
+        flan_res = _run_single_model_query(
+            model_name="flan_t5",
+            model_retry_engine=flan_engine,
+            request=request,
+            metadata=metadata,
+            max_attempts=max_attempts,
+        )
+        attempted_results.append(flan_res)
+        trace = flan_res.trace or {}
+        model_outputs["flan_t5"] = f"EXTRACTED:\n{trace.get('extracted', '')}\n\nFINAL SQL:\n{flan_res.sql}"
+
+    # 3. Rule-based generator fallback if nothing executed yet
+    if not any(r.executed for r in attempted_results):
+        logger.info("[PIPELINE] Running rule-based fallback generator...")
+        rule_engine = _build_rule_retry_engine()
+        rule_res = _run_single_model_query(
+            model_name="rule_based",
+            model_retry_engine=rule_engine,
+            request=request,
+            metadata=metadata,
+            max_attempts=1,
+        )
+        attempted_results.append(rule_res)
+        model_outputs["rule_based"] = f"FINAL SQL:\n{rule_res.sql}"
+
+    # Pick the best result
     executed_results = [r for r in attempted_results if r.executed]
     if executed_results:
         best = max(executed_results, key=_score_result)
     else:
         best = max(attempted_results, key=_score_result)
-    
+
     response = _query_response_from_result(
         request=request,
         result=best,
         model_outputs=model_outputs,
     )
-    
+
     if len(_query_cache) >= _QUERY_CACHE_MAX_ENTRIES:
         oldest_key = next(iter(_query_cache))
         _query_cache.pop(oldest_key, None)
     _query_cache[cache_key] = response
-    
+
     return response
 
 
 @app.post("/query/compare", response_model=CompareQueryResponse)
 def compare_query_models(request: QueryRequest) -> CompareQueryResponse:
-    """Compare FLAN-T5 and Mistral on a query."""
+    """Compare multiple models on a query (NVIDIA NIM Primary, Secondary, and Local FLAN-T5)."""
     metadata = STORE.get_database(request.db_id)
     if metadata is None:
         raise HTTPException(status_code=404, detail="Database not found")
@@ -679,71 +892,79 @@ def compare_query_models(request: QueryRequest) -> CompareQueryResponse:
             winner_model=None,
             winner_reason="Question is not relevant to database",
             models={
-                "flan_t5": invalid_result,
-                "mistral_7b": invalid_result,
+                "nvidia_primary": invalid_result,
+                "nvidia_secondary": invalid_result,
             },
         )
-    
+
     cache_key = (request.db_id, request.question.strip().lower(), request.max_rows)
     cached = _compare_cache.get(cache_key)
     if cached is not None:
         return cached
-    
-    compare_attempts = int(os.getenv("SQL_COMPARE_MAX_ATTEMPTS", "2"))
-    
-    flan_engine = _get_or_init_model_retry_engine("flan_t5")
-    mistral_engine = _get_or_init_model_retry_engine("mistral_7b")
-    
-    flan_result = _run_single_model_query(
-        model_name="flan_t5",
-        model_retry_engine=flan_engine,
-        request=request,
-        metadata=metadata,
-        max_attempts=compare_attempts,
-    )
-    
-    mistral_result = _run_single_model_query(
-        model_name="mistral_7b",
-        model_retry_engine=mistral_engine,
-        request=request,
-        metadata=metadata,
-        max_attempts=compare_attempts,
-    )
-    
-    # Pick winner based on execution and validity
-    if flan_result.executed and not mistral_result.executed:
-        winner = "flan_t5"
-        reason = "FLAN-T5 executed successfully"
-    elif mistral_result.executed and not flan_result.executed:
-        winner = "mistral_7b"
-        reason = "Mistral executed successfully"
-    elif flan_result.executed and mistral_result.executed:
-        if _score_result(flan_result) > _score_result(mistral_result):
-            winner = "flan_t5"
-            reason = "FLAN-T5 had better metrics"
-        else:
-            winner = "mistral_7b"
-            reason = "Mistral had better metrics"
+
+    few_shot_k = int(os.getenv("FEW_SHOT_MAX_EXAMPLES", "3"))
+    compared_models: dict[str, ModelQueryResult] = {}
+
+    if nim_service.is_configured():
+        # Compare NVIDIA Primary vs NVIDIA Secondary
+        nim_p = _run_nim_model_query(
+            model_choice="primary",
+            request=request,
+            metadata=metadata,
+            few_shot_k=few_shot_k,
+        )
+        compared_models["nvidia_primary"] = nim_p
+
+        nim_s = _run_nim_model_query(
+            model_choice="secondary",
+            request=request,
+            metadata=metadata,
+            few_shot_k=few_shot_k,
+        )
+        compared_models["nvidia_secondary"] = nim_s
     else:
-        if flan_result.valid and not mistral_result.valid:
-            winner = "flan_t5"
-            reason = "FLAN-T5 SQL was valid"
-        elif mistral_result.valid and not flan_result.valid:
-            winner = "mistral_7b"
-            reason = "Mistral SQL was valid"
+        # Fallback to local models when NIM is not configured
+        flan_engine = _get_or_init_model_retry_engine("flan_t5")
+        flan_result = _run_single_model_query(
+            model_name="flan_t5",
+            model_retry_engine=flan_engine,
+            request=request,
+            metadata=metadata,
+            max_attempts=2,
+        )
+        compared_models["flan_t5"] = flan_result
+
+        rule_engine = _build_rule_retry_engine()
+        rule_result = _run_single_model_query(
+            model_name="rule_based",
+            model_retry_engine=rule_engine,
+            request=request,
+            metadata=metadata,
+            max_attempts=1,
+        )
+        compared_models["rule_based"] = rule_result
+
+    # Pick winner
+    valid_candidates = [m for m in compared_models.values() if m.available]
+    if not valid_candidates:
+        winner = None
+        reason = "No models available"
+    else:
+        best_candidate = max(valid_candidates, key=_score_result)
+        winner = best_candidate.model_name
+        if best_candidate.executed:
+            reason = f"{winner} executed successfully with lowest latency / attempts"
+        elif best_candidate.valid:
+            reason = f"{winner} generated valid SQL syntax"
         else:
-            winner = "flan_t5" if _score_result(flan_result) > _score_result(mistral_result) else "mistral_7b"
-            reason = "Better overall score"
-    
+            reason = f"{winner} had the highest validation score"
+
     response = CompareQueryResponse(
         db_id=request.db_id,
         question=request.question,
         winner_model=winner,
         winner_reason=reason,
-        models={
-            "flan_t5": flan_result,
-            "mistral_7b": mistral_result,
-        },
+        models=compared_models,
     )
     
     if len(_compare_cache) >= _COMPARE_CACHE_MAX_ENTRIES:
