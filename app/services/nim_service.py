@@ -105,13 +105,13 @@ class NIMSQLService:
                     openai_api_key=target_api_key,
                     openai_api_base=target_base_url,
                     temperature=0.0,
-                    max_tokens=1024,
-                    timeout=45.0,
+                    max_tokens=2048,
+                    timeout=120.0,
                     max_retries=2,
                 )
             except ImportError:
                 from openai import OpenAI
-                client = OpenAI(base_url=target_base_url, api_key=target_api_key)
+                client = OpenAI(base_url=target_base_url, api_key=target_api_key, timeout=120.0)
                 self._llm_instances[client_key] = client
 
         return self._llm_instances[client_key]
