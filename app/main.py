@@ -28,6 +28,7 @@ from app.models import (
     QueryRequest,
     QueryResponse,
     UploadDatabaseResponse,
+    ValidationIssue,
 )
 from app.services.embedding_service import EmbeddingService
 from app.services.executor import SQLExecutor
@@ -446,9 +447,9 @@ def _run_nim_model_query(
         sql = gen_res.get("sql", "").strip()
 
         start_val = time.perf_counter()
-        val_issues = validator.validate(sql, metadata.schema, dialect=metadata.db_type)
+        val_result = validator.validate(sql, metadata)
         validation_ms = (time.perf_counter() - start_val) * 1000
-        issue_messages = [i.message for i in val_issues if i.level == "error"]
+        issue_messages = list(val_result.issues)
 
         executed = False
         execution_ms = 0.0
@@ -479,39 +480,48 @@ def _run_nim_model_query(
                 execution_error = str(exc)
                 logger.info(f"[NIM] Execution failed ({exc}), attempting self-healing reflection...")
 
-                # Self-healing reflection loop
-                try:
-                    attempts = 2
-                    repaired = nim_service.repair_sql(
-                        question=request.question,
-                        failed_sql=sql,
-                        error_message=execution_error,
-                        schema=metadata.schema,
-                        dialect=metadata.db_type,
-                        model_choice=model_choice,
-                    )
-                    sql = repaired.get("sql", sql).strip()
-                    start_exec = time.perf_counter()
-                    result = executor.execute(
-                        db_path=str(metadata.file_path) if metadata.file_path is not None else None,
-                        sql=sql,
-                        max_rows=request.max_rows,
-                        db_type=metadata.db_type,
-                        connection_url=metadata.connection_url,
-                    )
-                    execution_ms = (time.perf_counter() - start_exec) * 1000
-                    executed = True
-                    columns = result.columns
-                    rows = result.rows
-                    row_count = result.row_count
-                    truncated = result.truncated
-                    execution_error = ""
-                    logger.info("[NIM] Self-healing reflection succeeded! Corrected SQL executed successfully.")
-                except Exception as repair_exc:
-                    execution_error = str(repair_exc)
-                    logger.warning(f"[NIM] Self-healing reflection failed: {repair_exc}")
+        # Self-healing reflection loop if execution failed or validation failed on non-empty SQL
+        if sql and (execution_error or issue_messages):
+            try:
+                attempts = 2
+                err_msg = execution_error or "; ".join(issue_messages)
+                logger.info(f"[NIM] Triggering self-healing reflection for error: {err_msg}")
+                repaired = nim_service.repair_sql(
+                    question=request.question,
+                    failed_sql=sql,
+                    error_message=err_msg,
+                    schema=metadata.schema,
+                    dialect=metadata.db_type,
+                    model_choice=model_choice,
+                )
+                repaired_sql = repaired.get("sql", "").strip()
+                if repaired_sql:
+                    sql = repaired_sql
+                    reval = validator.validate(sql, metadata)
+                    issue_messages = list(reval.issues)
+                    if not issue_messages:
+                        start_exec = time.perf_counter()
+                        result = executor.execute(
+                            db_path=str(metadata.file_path) if metadata.file_path is not None else None,
+                            sql=sql,
+                            max_rows=request.max_rows,
+                            db_type=metadata.db_type,
+                            connection_url=metadata.connection_url,
+                        )
+                        execution_ms = (time.perf_counter() - start_exec) * 1000
+                        executed = True
+                        columns = result.columns
+                        rows = result.rows
+                        row_count = result.row_count
+                        truncated = result.truncated
+                        execution_error = ""
+                        logger.info("[NIM] Self-healing reflection succeeded! Corrected SQL executed successfully.")
+            except Exception as repair_exc:
+                execution_error = str(repair_exc)
+                logger.warning(f"[NIM] Self-healing reflection failed: {repair_exc}")
 
         total_ms = (time.perf_counter() - start_total) * 1000
+        val_issues_objs = [ValidationIssue(level="error", message=m) for m in issue_messages]
 
         return ModelQueryResult(
             model_name=resolved_model_name,
@@ -532,6 +542,7 @@ def _run_nim_model_query(
             row_count=row_count,
             truncated=truncated,
             issues=issue_messages,
+            validation_issues=val_issues_objs,
             error=execution_error or None,
             trace={
                 "raw_output": gen_res.get("raw_output", ""),
@@ -563,7 +574,7 @@ def _score_result(result: ModelQueryResult) -> tuple:
     return (
         int(result.executed),  # Executed is most important
         int(result.valid),      # Then valid
-        result.attempts,        # Then fewer attempts
+        -result.attempts,        # Then fewer attempts (1 attempt preferred over 2)
         -result.metrics.total_ms,  # Then faster
     )
 
